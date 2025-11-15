@@ -1,0 +1,1 @@
+.\bin\Release\net8.0\UnityLauncher.exe

@@ -2,62 +2,205 @@
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Net;
+using System.Text;
 
 class Program
 {
-    // Change this to your Unity-built exe path, or pass it as the first argument
+    // HTTP endpoint where this launcher will listen
+    // Example: http://localhost:5000/startprogram
+    private const string HttpPrefix = "http://+:5000/";
+
+    // Default Unity exe path (can be overridden by first command-line argument)
     private static readonly string DefaultUnityExePath =
         @"C:\Ritual\LaserRitual.exe";
+
+    // This is the path that will actually be used (default or from args)
+    private static string UnityExePath = DefaultUnityExePath;
 
     static int Main(string[] args)
     {
         try
         {
-            // 1) Determine which exe to start
-            string unityExePath = args.Length > 0 ? args[0] : DefaultUnityExePath;
+            // Allow overriding the exe path from command line
+            if (args.Length > 0 && !string.IsNullOrWhiteSpace(args[0]))
+            {
+                UnityExePath = args[0];
+                Console.WriteLine($"[INFO] Unity exe path overridden from args: {UnityExePath}");
+            }
+            else
+            {
+                Console.WriteLine($"[INFO] Using default Unity exe path: {UnityExePath}");
+            }
+
+            // ---- HTTP SERVER SETUP ----
+            var listener = new HttpListener();
+            listener.Prefixes.Add(HttpPrefix);
+
+            try
+            {
+                listener.Start();
+            }
+            catch (HttpListenerException ex)
+            {
+                Console.WriteLine("ERROR: Could not start HttpListener.");
+                Console.WriteLine("You probably need to reserve the URL with netsh, for example:");
+                Console.WriteLine(@"  netsh http add urlacl url=http://+:5000/ user=DOMAIN\\User");
+                Console.WriteLine();
+                Console.WriteLine(ex);
+                return 1;
+            }
+
+            Console.WriteLine("====================================");
+            Console.WriteLine(" Unity Launcher HTTP");
+            Console.WriteLine("====================================");
+            Console.WriteLine($"Listening on: {HttpPrefix}");
+            Console.WriteLine("Available endpoints:");
+            Console.WriteLine("  GET /startprogram  -> start Unity game");
+            Console.WriteLine("  GET /health        -> health check (returns OK)");
+            Console.WriteLine("====================================");
+            Console.WriteLine("Press Ctrl+C to exit.");
+            Console.WriteLine();
+
+            // ---- MAIN LOOP: handle requests forever ----
+            while (true)
+            {
+                HttpListenerContext? context = null;
+                try
+                {
+                    // Blocking call, waits for a request
+                    context = listener.GetContext();
+                }
+                catch (HttpListenerException ex)
+                {
+                    Console.WriteLine("Listener stopped or error occurred:");
+                    Console.WriteLine(ex);
+                    break;
+                }
+                catch (ObjectDisposedException)
+                {
+                    // Listener closed, exit loop
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine("Unexpected error accepting HTTP request:");
+                    Console.WriteLine(ex);
+                    continue;
+                }
+
+                // Handle the request in the same thread (simple, enough for this use case)
+                HandleRequest(context);
+            }
+
+            listener.Close();
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("FATAL ERROR in UnityLauncher:");
+            Console.WriteLine(ex);
+            return 1;
+        }
+    }
+
+    private static void HandleRequest(HttpListenerContext context)
+    {
+        var request = context.Request;
+        var response = context.Response;
+
+        string path = request.Url?.AbsolutePath?.ToLowerInvariant() ?? "/";
+        string method = request.HttpMethod.ToUpperInvariant();
+
+        Console.WriteLine($"[{DateTime.Now:O}] {method} {path}");
+
+        try
+        {
+            if (method == "GET" && path == "/startprogram")
+            {
+                // Call our Unity starter
+                StartUnity(out string message, out int statusCode);
+
+                response.StatusCode = statusCode;
+                WriteString(response, message);
+            }
+            else if (method == "GET" && path == "/health")
+            {
+                response.StatusCode = 200;
+                WriteString(response, "OK");
+            }
+            else
+            {
+                response.StatusCode = 404;
+                WriteString(response, "Not found");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("ERROR handling request:");
+            Console.WriteLine(ex);
+            response.StatusCode = 500;
+            WriteString(response, "Internal server error");
+        }
+        finally
+        {
+            response.Close();
+        }
+    }
+
+    private static void WriteString(HttpListenerResponse response, string content)
+    {
+        byte[] buffer = Encoding.UTF8.GetBytes(content);
+        response.ContentType = "text/plain; charset=utf-8";
+        response.ContentEncoding = Encoding.UTF8;
+        response.ContentLength64 = buffer.Length;
+
+        using var output = response.OutputStream;
+        output.Write(buffer, 0, buffer.Length);
+    }
+
+    // ---- Your original Unity-start logic, adapted into a method ----
+    private static void StartUnity(out string message, out int httpStatusCode)
+    {
+        try
+        {
+            string unityExePath = UnityExePath;
 
             if (string.IsNullOrWhiteSpace(unityExePath))
             {
-                Console.WriteLine("ERROR: No Unity exe path specified.");
-                Console.WriteLine("Usage: UnityLauncher.exe \"C:\\path\\to\\MyGame.exe\"");
-                return 1;
+                message = "ERROR: No Unity exe path specified.";
+                httpStatusCode = 500;
+                return;
             }
 
             if (!File.Exists(unityExePath))
             {
-                Console.WriteLine($"ERROR: Unity exe not found at:\n  {unityExePath}");
-                return 1;
+                message = $"ERROR: Unity exe not found at:\n  {unityExePath}";
+                httpStatusCode = 500;
+                return;
             }
 
-            // 2) Optional: avoid starting if already running
-            // (Uses the exe file name without extension as process name)
+            // Avoid starting if already running (uses exe name without extension)
             string processName = Path.GetFileNameWithoutExtension(unityExePath);
             bool alreadyRunning = Process.GetProcessesByName(processName).Any();
 
             if (alreadyRunning)
             {
-                Console.WriteLine($"INFO: \"{processName}\" is already running. Not starting another instance.");
-                return 0;
+                message = $"INFO: \"{processName}\" is already running. Not starting another instance.";
+                httpStatusCode = 200;
+                return;
             }
 
-            // 3) Build arguments (any extra args passed to this launcher)
+            // No extra args for now; you can add them here if needed
             string arguments = "";
-            if (args.Length > 1)
-            {
-                // Everything after the first arg will be passed to Unity
-                var extraArgs = args.Skip(1)
-                                    .Select(a => QuoteIfNeeded(a));
-                arguments = string.Join(" ", extraArgs);
-            }
 
-            // 4) Configure process start info
             var startInfo = new ProcessStartInfo
             {
                 FileName = unityExePath,
                 Arguments = arguments,
                 WorkingDirectory = Path.GetDirectoryName(unityExePath) ?? Environment.CurrentDirectory,
-                UseShellExecute = false, // good default for services / scripts
-                CreateNoWindow = false   // set to true if you don't want a console window
+                UseShellExecute = false,
+                CreateNoWindow = false  // true if you want to hide the Unity window (usually false)
             };
 
             Console.WriteLine($"Starting Unity app:\n  {unityExePath}");
@@ -68,24 +211,27 @@ class Program
 
             if (proc == null)
             {
-                Console.WriteLine("ERROR: Failed to start process (Process.Start returned null).");
-                return 1;
+                message = "ERROR: Failed to start process (Process.Start returned null).";
+                httpStatusCode = 500;
+                return;
             }
 
             Console.WriteLine($"Unity process started, PID: {proc.Id}");
-            return 0;
+            message = $"Unity process started, PID: {proc.Id}";
+            httpStatusCode = 200;
         }
         catch (Exception ex)
         {
             Console.WriteLine("ERROR: Exception while starting Unity app:");
             Console.WriteLine(ex);
-            return 1;
+            message = "ERROR: Exception while starting Unity app:\n" + ex;
+            httpStatusCode = 500;
         }
     }
 
+    // Keeps your helper in case you later want to add args
     private static string QuoteIfNeeded(string arg)
     {
-        // Adds quotes if the arg has spaces, simple helper
         if (string.IsNullOrWhiteSpace(arg))
             return "\"\"";
 

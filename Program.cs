@@ -129,6 +129,37 @@ class Program
                 response.StatusCode = 200;
                 WriteString(response, "OK");
             }
+            // Add a method that receives /execute and then the path to the specific program to execute and runs it
+            else if (method == "GET" && path.StartsWith("/execute"))
+            {
+                string programPath = path.Substring("/execute".Length).TrimStart('/');
+                programPath = Path.Combine(@"c:\Ritual\", programPath);
+
+                if (string.IsNullOrWhiteSpace(programPath))
+                {
+                    response.StatusCode = 400;
+                    WriteString(response, "No program specified.");
+                }
+                else if (!File.Exists(programPath))
+                {
+                    response.StatusCode = 404;
+                    WriteString(response, $"Program not found: {programPath}");
+                }
+                else
+                {
+                    try
+                    {
+                        Process.Start(programPath);
+                        response.StatusCode = 200;
+                        WriteString(response, $"Started program: {programPath}");
+                    }
+                    catch (Exception ex)
+                    {
+                        response.StatusCode = 500;
+                        WriteString(response, $"Error starting program: {ex.Message}");
+                    }
+                }
+            }
             else
             {
                 response.StatusCode = 404;
